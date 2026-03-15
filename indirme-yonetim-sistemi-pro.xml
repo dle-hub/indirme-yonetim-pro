@@ -1,0 +1,506 @@
+<?xml version="1.0" encoding="utf-8"?>
+<dleplugin>
+	<name>İndirme Yönetim Sistemi Pro</name>
+	<description>Dış link indirme takibi, sayaç, grafik, saat/gün analizi ve kullanıcı bazlı istatistik sistemi</description>
+	<icon></icon>
+	<version>2.0</version>
+	<dleversion>17</dleversion>
+	<versioncompare>greater</versioncompare>
+	<upgradeurl></upgradeurl>
+	<filedelete>0</filedelete>
+	<needplugin></needplugin>
+	<mnotice>1</mnotice>
+	<mysqlinstall><![CDATA[CREATE TABLE IF NOT EXISTS {prefix}_download_stats (
+    news_id INT PRIMARY KEY,
+    download_count INT DEFAULT 0,
+    last_download DATETIME
+) ENGINE=InnoDB DEFAULT CHARSET={charset};
+
+CREATE TABLE IF NOT EXISTS {prefix}_download_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    news_id INT NOT NULL,
+    user_id INT DEFAULT 0,
+    username VARCHAR(40) DEFAULT '',
+    ip VARCHAR(45) DEFAULT '',
+    downloaded_at DATETIME DEFAULT NOW(),
+    INDEX idx_news_id (news_id),
+    INDEX idx_user_id (user_id),
+    INDEX idx_downloaded_at (downloaded_at)
+) ENGINE=InnoDB DEFAULT CHARSET={charset};]]></mysqlinstall>
+	<mysqlupgrade><![CDATA[CREATE TABLE IF NOT EXISTS {prefix}_download_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    news_id INT NOT NULL,
+    user_id INT DEFAULT 0,
+    username VARCHAR(40) DEFAULT '',
+    ip VARCHAR(45) DEFAULT '',
+    downloaded_at DATETIME DEFAULT NOW(),
+    INDEX idx_news_id (news_id),
+    INDEX idx_user_id (user_id),
+    INDEX idx_downloaded_at (downloaded_at)
+) ENGINE=InnoDB DEFAULT CHARSET={charset};]]></mysqlupgrade>
+	<mysqlenable><![CDATA[REPLACE INTO `{prefix}_admin_sections` (`name`, `title`, `descr`, `icon`, `allow_groups`)
+VALUES ('download_stats', 'İndirme İstatistikleri', 'Bulut indirme sayılarını takip edin', 'public/adminpanel/images/rebuild.png', '1');]]></mysqlenable>
+	<mysqldisable><![CDATA[DELETE FROM `{prefix}_admin_sections` WHERE `name` = 'download_stats';]]></mysqldisable>
+	<mysqldelete><![CDATA[DROP TABLE IF EXISTS {prefix}_download_stats;
+DROP TABLE IF EXISTS {prefix}_download_log;
+DELETE FROM `{prefix}_admin_sections` WHERE `name` = 'download_stats';]]></mysqldelete>
+	<phpinstall><![CDATA[]]></phpinstall>
+	<phpupgrade><![CDATA[]]></phpupgrade>
+	<phpenable><![CDATA[]]></phpenable>
+	<phpdisable><![CDATA[]]></phpdisable>
+	<phpdelete><![CDATA[]]></phpdelete>
+	<notice><![CDATA[Alan Adı: filepass | Tanım: Dosya Şifresi | Tip: Tek Satırlı Metin
+​Alan Adı: download2 | Tanım: Alternatif Link 1 | Tip: Tek Satırlı Metin
+​Alan Adı: download3 | Tanım: Alternatif Link 2 | Tip: Tek Satırlı Metin]]></notice>
+	<file name="engine/modules/tracker.php">
+		<operation action="create">
+			<replacecode><![CDATA[<?php
+/*
+=====================================================
+ DLE Cloud Tracker - Sayaç Motoru v2.0
+=====================================================
+*/
+if (!defined('DATALIFEENGINE')) { die("Hacking attempt!"); }
+
+function track_download($news_id) {
+    global $db, $member_id, $is_logged, $_IP;
+    $news_id = intval($news_id);
+    if ($news_id <= 0) return;
+
+    // Ana sayaç tablosunu güncelle
+    $db->query("INSERT INTO " . PREFIX . "_download_stats (news_id, download_count, last_download)
+                VALUES ('$news_id', 1, NOW())
+                ON DUPLICATE KEY UPDATE download_count = download_count + 1, last_download = NOW()");
+
+    // Detaylı log tablosuna yaz
+    $user_id  = ($is_logged && isset($member_id['user_id'])) ? intval($member_id['user_id']) : 0;
+    $username = ($is_logged && isset($member_id['name']))    ? $db->safesql($member_id['name']) : '';
+    $ip       = $db->safesql($_IP);
+
+    $db->query("INSERT INTO " . PREFIX . "_download_log (news_id, user_id, username, ip, downloaded_at)
+                VALUES ('$news_id', '$user_id', '$username', '$ip', NOW())");
+}
+?>]]></replacecode>
+			<enabled>1</enabled>
+		</operation>
+	</file>
+	<file name="engine/inc/download_stats.php">
+		<operation action="create">
+			<replacecode><![CDATA[<?php
+if( !defined( 'DATALIFEENGINE' ) OR !defined( 'LOGGED_IN' ) ) {
+    header( "HTTP/1.1 403 Forbidden" );
+    header ( 'Location: ../../' );
+    die( "Hacking attempt!" );
+}
+
+echoheader( "<i class=\"fa fa-download position-left\"></i><span class=\"text-semibold\">İndirme İstatistikleri</span>", "v2.0 — Sayaç, Grafik, Analiz" );
+
+// Toplam özet
+$total_stats = $db->super_query("SELECT SUM(download_count) as total_dl, COUNT(*) as total_files FROM " . PREFIX . "_download_stats");
+$total_dl    = isset($total_stats['total_dl'])    ? number_format($total_stats['total_dl']) : 0;
+$total_files = isset($total_stats['total_files']) ? $total_stats['total_files'] : 0;
+$total_log   = $db->super_query("SELECT COUNT(*) as cnt FROM " . PREFIX . "_download_log");
+$total_log   = isset($total_log['cnt']) ? number_format($total_log['cnt']) : 0;
+$total_users = $db->super_query("SELECT COUNT(DISTINCT user_id) as cnt FROM " . PREFIX . "_download_log WHERE user_id > 0");
+$total_users = isset($total_users['cnt']) ? $total_users['cnt'] : 0;
+
+// Son 30 günlük trend verisi (grafik için)
+$trend_data  = [];
+$trend_labels = [];
+$db->query("SELECT DATE(downloaded_at) as dl_date, COUNT(*) as cnt
+            FROM " . PREFIX . "_download_log
+            WHERE downloaded_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            GROUP BY DATE(downloaded_at)
+            ORDER BY dl_date ASC");
+while($r = $db->get_row()) {
+    $trend_labels[] = date('d.m', strtotime($r['dl_date']));
+    $trend_data[]   = intval($r['cnt']);
+}
+$trend_labels_json = json_encode($trend_labels);
+$trend_data_json   = json_encode($trend_data);
+
+// Saatlik dağılım (grafik için)
+$hour_data = array_fill(0, 24, 0);
+$db->query("SELECT HOUR(downloaded_at) as hr, COUNT(*) as cnt
+            FROM " . PREFIX . "_download_log
+            GROUP BY HOUR(downloaded_at)");
+while($r = $db->get_row()) {
+    $hour_data[intval($r['hr'])] = intval($r['cnt']);
+}
+$hour_labels = json_encode(array_map(function($h){ return $h.':00'; }, range(0,23)));
+$hour_data_json = json_encode(array_values($hour_data));
+
+// Haftanın günleri dağılımı
+$day_names = ['Pazar','Pazartesi','Salı','Çarşamba','Perşembe','Cuma','Cumartesi'];
+$day_data  = array_fill(0, 7, 0);
+$db->query("SELECT DAYOFWEEK(downloaded_at) as dw, COUNT(*) as cnt
+            FROM " . PREFIX . "_download_log
+            GROUP BY DAYOFWEEK(downloaded_at)");
+while($r = $db->get_row()) {
+    $day_data[intval($r['dw'])-1] = intval($r['cnt']);
+}
+$day_labels_json = json_encode($day_names);
+$day_data_json   = json_encode($day_data);
+
+?>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+function ChangeOption(obj, selectedOption) {
+    $("#navbar-filter li").removeClass('active');
+    $(obj).closest('li').addClass('active');
+    $("#tab_top, #tab_trend, #tab_hours, #tab_users").hide();
+    $("#" + selectedOption).fadeIn('fast');
+    if ($(window).width() < 768) {
+        $('.navbar-collapse').collapse('hide');
+    }
+    return false;
+}
+</script>
+
+<!-- Navbar -->
+<div class="navbar navbar-default navbar-component navbar-xs mb-20">
+    <ul class="nav navbar-nav visible-xs-block">
+        <li class="full-width text-center">
+            <a data-toggle="collapse" data-target="#navbar-filter">
+                <i class="fa fa-bars"></i> MENÜYÜ AÇ
+            </a>
+        </li>
+    </ul>
+    <div class="navbar-collapse collapse" id="navbar-filter">
+        <ul class="nav navbar-nav">
+            <li class="active">
+                <a onclick="return ChangeOption(this, 'tab_top');"><i class="fa fa-list position-left"></i> En Çok İndirilen</a>
+            </li>
+            <li>
+                <a onclick="return ChangeOption(this, 'tab_trend');"><i class="fa fa-line-chart position-left"></i> Trend Grafik</a>
+            </li>
+            <li>
+                <a onclick="return ChangeOption(this, 'tab_hours');"><i class="fa fa-clock-o position-left"></i> Saat / Gün Analizi</a>
+            </li>
+            <li>
+                <a onclick="return ChangeOption(this, 'tab_users');"><i class="fa fa-users position-left"></i> Kullanıcı Bazlı</a>
+            </li>
+        </ul>
+    </div>
+</div>
+
+<!-- Özet Kartlar -->
+<div class="row mb-20">
+    <div class="col-xs-6 col-sm-3">
+        <div class="panel panel-flat">
+            <div class="panel-body text-center">
+                <h2 class="text-semibold no-margin text-success"><?php echo $total_dl; ?></h2>
+                <span class="text-muted text-size-small text-uppercase">Toplam Sayaç</span>
+            </div>
+        </div>
+    </div>
+    <div class="col-xs-6 col-sm-3">
+        <div class="panel panel-flat">
+            <div class="panel-body text-center">
+                <h2 class="text-semibold no-margin text-primary"><?php echo $total_log; ?></h2>
+                <span class="text-muted text-size-small text-uppercase">Log Kaydı</span>
+            </div>
+        </div>
+    </div>
+    <div class="col-xs-6 col-sm-3">
+        <div class="panel panel-flat">
+            <div class="panel-body text-center">
+                <h2 class="text-semibold no-margin text-warning"><?php echo $total_files; ?></h2>
+                <span class="text-muted text-size-small text-uppercase">Takip Edilen</span>
+            </div>
+        </div>
+    </div>
+    <div class="col-xs-6 col-sm-3">
+        <div class="panel panel-flat">
+            <div class="panel-body text-center">
+                <h2 class="text-semibold no-margin text-info"><?php echo $total_users; ?></h2>
+                <span class="text-muted text-size-small text-uppercase">Üye İndirdi</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<div id="tab_top">
+    <div class="panel panel-flat">
+        <div class="panel-heading">
+            <h5 class="panel-title">En Çok İndirilen İlk 50</h5>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead>
+                    <tr>
+                        <th style="width:70px;">#</th>
+                        <th>Yazı Başlığı</th>
+                        <th class="text-center" style="width:120px;">İndirme</th>
+                        <th class="text-center" style="width:180px;">Son İşlem</th>
+                        <th class="text-center" style="width:80px;">İncele</th>
+                    </tr>
+                </thead>
+                <tbody>
+<?php
+$db->query("SELECT s.*, p.title, p.alt_name FROM " . PREFIX . "_download_stats s
+            LEFT JOIN " . PREFIX . "_post p ON s.news_id = p.id
+            ORDER BY s.download_count DESC LIMIT 50");
+if ($db->num_rows() > 0) {
+    $rank = 1;
+    while($row = $db->get_row()) {
+        $last_date = date("d.m.Y H:i", strtotime($row['last_download']));
+        $full_link = $config['http_home_url'] . $row['news_id'] . "-" . $row['alt_name'] . ".html";
+        $badge = $rank == 1 ? 'bg-warning-400' : ($rank == 2 ? 'bg-slate-400' : ($rank == 3 ? 'bg-brown-400' : 'bg-grey-400'));
+        echo "
+        <tr>
+            <td><span class='label {$badge}'>{$rank}</span></td>
+            <td><span class='text-semibold'>{$row['title']}</span></td>
+            <td class='text-center'><span class='badge badge-success' style='font-size:12px;'>{$row['download_count']}</span></td>
+            <td class='text-center'><span class='text-muted text-size-small'>{$last_date}</span></td>
+            <td class='text-center'>
+                <a href='{$full_link}' target='_blank' class='btn btn-default btn-xs btn-icon'><i class='fa fa-external-link'></i></a>
+            </td>
+        </tr>";
+        $rank++;
+    }
+} else {
+    echo "<tr><td colspan='5' class='text-center text-muted' style='padding:30px;'>Henüz veri bulunmuyor.</td></tr>";
+}
+?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- TAB: Trend Grafik -->
+<div id="tab_trend" style="display:none">
+    <div class="panel panel-flat">
+        <div class="panel-heading">
+            <h5 class="panel-title"><i class="fa fa-line-chart position-left"></i> Son 30 Gün İndirme Trendi</h5>
+        </div>
+        <div class="panel-body">
+            <canvas id="chartTrend" style="max-height:320px;"></canvas>
+        </div>
+    </div>
+    <script>
+    $(function(){
+        var ctx = document.getElementById('chartTrend').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: <?php echo $trend_labels_json; ?>,
+                datasets: [{
+                    label: 'İndirme',
+                    data: <?php echo $trend_data_json; ?>,
+                    borderColor: '#2196F3',
+                    backgroundColor: 'rgba(33,150,243,0.08)',
+                    borderWidth: 2,
+                    pointRadius: 3,
+                    fill: true,
+                    tension: 0.3
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, ticks: { stepSize: 1 } }
+                }
+            }
+        });
+    });
+    </script>
+</div>
+
+<!-- TAB: Saat / Gün Analizi -->
+<div id="tab_hours" style="display:none">
+    <div class="row">
+        <div class="col-sm-7">
+            <div class="panel panel-flat">
+                <div class="panel-heading">
+                    <h5 class="panel-title"><i class="fa fa-clock-o position-left"></i> Saatlik Dağılım</h5>
+                </div>
+                <div class="panel-body">
+                    <canvas id="chartHours" style="max-height:280px;"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-5">
+            <div class="panel panel-flat">
+                <div class="panel-heading">
+                    <h5 class="panel-title"><i class="fa fa-calendar position-left"></i> Haftanın Günleri</h5>
+                </div>
+                <div class="panel-body">
+                    <canvas id="chartDays" style="max-height:280px;"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+    $(function(){
+        var ctxH = document.getElementById('chartHours').getContext('2d');
+        new Chart(ctxH, {
+            type: 'bar',
+            data: {
+                labels: <?php echo $hour_labels; ?>,
+                datasets: [{
+                    label: 'İndirme',
+                    data: <?php echo $hour_data_json; ?>,
+                    backgroundColor: 'rgba(76,175,80,0.7)',
+                    borderColor: '#4CAF50',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } }
+            }
+        });
+
+        var ctxD = document.getElementById('chartDays').getContext('2d');
+        new Chart(ctxD, {
+            type: 'doughnut',
+            data: {
+                labels: <?php echo $day_labels_json; ?>,
+                datasets: [{
+                    data: <?php echo $day_data_json; ?>,
+                    backgroundColor: ['#f44336','#2196F3','#4CAF50','#FF9800','#9C27B0','#00BCD4','#FF5722']
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { position: 'bottom' } }
+            }
+        });
+    });
+    </script>
+</div>
+
+<!-- TAB: Kullanıcı Bazlı -->
+<div id="tab_users" style="display:none">
+    <div class="panel panel-flat">
+        <div class="panel-heading">
+            <h5 class="panel-title"><i class="fa fa-users position-left"></i> En Çok İndiren Üyeler (İlk 50)</h5>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead>
+                    <tr>
+                        <th style="width:50px;">#</th>
+                        <th>Kullanıcı</th>
+                        <th class="text-center" style="width:120px;">İndirme</th>
+                        <th class="text-center" style="width:180px;">Son İşlem</th>
+                        <th class="text-center" style="width:80px;">Profil</th>
+                    </tr>
+                </thead>
+                <tbody>
+<?php
+$db->query("SELECT user_id, username, COUNT(*) as cnt, MAX(downloaded_at) as last_dl
+            FROM " . PREFIX . "_download_log
+            WHERE user_id > 0
+            GROUP BY user_id, username
+            ORDER BY cnt DESC
+            LIMIT 50");
+if ($db->num_rows() > 0) {
+    $rank = 1;
+    while($row = $db->get_row()) {
+        $last_date   = date("d.m.Y H:i", strtotime($row['last_dl']));
+        $profile_url = $config['http_home_url'] . "index.php?subaction=userinfo&user=" . urlencode($row['username']);
+        echo "
+        <tr>
+            <td><span class='label label-default'>{$rank}</span></td>
+            <td><i class='fa fa-user text-muted position-left'></i><span class='text-semibold'>{$row['username']}</span></td>
+            <td class='text-center'><span class='badge badge-primary' style='font-size:12px;'>{$row['cnt']}</span></td>
+            <td class='text-center'><span class='text-muted text-size-small'>{$last_date}</span></td>
+            <td class='text-center'>
+                <a href='{$profile_url}' target='_blank' class='btn btn-default btn-xs btn-icon'><i class='fa fa-external-link'></i></a>
+            </td>
+        </tr>";
+        $rank++;
+    }
+} else {
+    echo "<tr><td colspan='5' class='text-center text-muted' style='padding:30px;'>Henüz üye indirmesi bulunmuyor.</td></tr>";
+}
+?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="panel panel-flat">
+        <div class="panel-heading">
+            <h5 class="panel-title"><i class="fa fa-history position-left"></i> Son 100 İndirme Logu</h5>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead>
+                    <tr>
+                        <th>Kullanıcı</th>
+                        <th>Yazı</th>
+                        <th class="text-center hidden-xs" style="width:120px;">IP</th>
+                        <th class="text-center" style="width:180px;">Tarih</th>
+                    </tr>
+                </thead>
+                <tbody>
+<?php
+$db->query("SELECT l.*, p.title, p.alt_name FROM " . PREFIX . "_download_log l
+            LEFT JOIN " . PREFIX . "_post p ON l.news_id = p.id
+            ORDER BY l.downloaded_at DESC
+            LIMIT 100");
+if ($db->num_rows() > 0) {
+    while($row = $db->get_row()) {
+        $dl_date   = date("d.m.Y H:i", strtotime($row['downloaded_at']));
+        $full_link = $config['http_home_url'] . $row['news_id'] . "-" . $row['alt_name'] . ".html";
+        $uname     = $row['username'] ? $row['username'] : '<span class="text-muted">Misafir</span>';
+        echo "
+        <tr>
+            <td><i class='fa fa-user text-muted position-left'></i>{$uname}</td>
+            <td><a href='{$full_link}' target='_blank' class='text-semibold'>{$row['title']}</a></td>
+            <td class='text-center hidden-xs'><span class='text-muted text-size-small'>{$row['ip']}</span></td>
+            <td class='text-center'><span class='text-muted text-size-small'>{$dl_date}</span></td>
+        </tr>";
+    }
+} else {
+    echo "<tr><td colspan='4' class='text-center text-muted' style='padding:30px;'>Henüz log kaydı bulunmuyor.</td></tr>";
+}
+?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<?php echofooter(); ?>]]></replacecode>
+			<enabled>1</enabled>
+		</operation>
+	</file>
+	<file name="engine/modules/show.full.php">
+		<operation action="before">
+			<searchcode><![CDATA[$tpl->set( '', $news_find );]]></searchcode>
+			<replacecode><![CDATA[// Cloud Tracker Sayacı
+$dl_stats = $db->super_query("SELECT download_count FROM " . PREFIX . "_download_stats WHERE news_id='{$row['id']}'");
+$count_val = (isset($dl_stats['download_count'])) ? $dl_stats['download_count'] : 0;
+$tpl->set( '{download-count}', $count_val );]]></replacecode>
+			<enabled>1</enabled>
+		</operation>
+	</file>
+	<file name="engine/inc/main.php">
+		<operation action="after">
+			<searchcode><![CDATA[<h6 class="media-heading  text-semibold">{$lang['opt_all_rublik']}</h6>
+				<span class="text-muted">{$lang['opt_all_rublikc']}</span>
+			</div>
+		</a>
+	  </div>]]></searchcode>
+			<replacecode><![CDATA[
+	  <div class="col-sm-6 media-list media-list-linked">
+		<a class="media-link" href="?mod=download_stats">
+			<div class="media-left"><img src="/public/adminpanel/images/rebuild.png" class="img-lg section_icon"></div>
+			<div class="media-body">
+				<h6 class="media-heading  text-semibold">İndirme İstatistikleri</h6>
+				<span class="text-muted text-size-small">Sayaç, grafik ve kullanıcı analizi</span>
+			</div>
+		</a>
+	  </div>]]></replacecode>
+			<enabled>1</enabled>
+		</operation>
+	</file>
+</dleplugin>
